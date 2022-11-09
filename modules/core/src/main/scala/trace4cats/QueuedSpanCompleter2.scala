@@ -2,16 +2,13 @@ package trace4cats
 
 import cats.Applicative
 import cats.effect.kernel.syntax.spawn._
-import cats.effect.kernel.{Clock, Ref, Resource, Temporal}
+import cats.effect.kernel.{Ref, Resource, Temporal}
 import cats.effect.std.Queue
 import cats.syntax.applicativeError._
 import cats.syntax.flatMap._
 import cats.syntax.functor._
-import cats.syntax.monad._
 import fs2.{Chunk, Stream}
 import org.typelevel.log4cats.Logger
-
-import scala.concurrent.duration._
 
 object QueuedSpanCompleter2 {
   def apply[F[_]: Temporal: Logger](
@@ -23,10 +20,10 @@ object QueuedSpanCompleter2 {
 
     for {
       hasLoggedWarn <- Resource.eval(Ref.of(false))
-      queue <- Resource.eval(Queue.bounded[F, CompletedSpan](realBufferSize))
+      queue <- Resource.eval(Queue.bounded[F, Option[CompletedSpan]](realBufferSize))
       _ <- Resource.make {
         Stream
-          .fromQueueUnterminated(queue)
+          .fromQueueNoneTerminated(queue)
           .groupWithin(config.batchSize, config.batchTimeout)
           .map(spans => Batch(spans))
           .evalMap { batch =>
@@ -46,7 +43,7 @@ object QueuedSpanCompleter2 {
           .compile
           .drain
           .start
-      }(fiber => Clock[F].sleep(50.millis).whileM_(queue.size.map(_ != 0)) >> fiber.join.void)
+      }(fiber => queue.offer(None) >> fiber.join.void)
     } yield new SpanCompleter[F] {
       override def complete(span: CompletedSpan.Builder): F[Unit] = {
 
@@ -58,7 +55,7 @@ object QueuedSpanCompleter2 {
           )
 
         queue
-          .tryOffer(span.build(process))
+          .tryOffer(Some(span.build(process)))
           .ifM(hasLoggedWarn.set(false), warnLog)
       }
     }
